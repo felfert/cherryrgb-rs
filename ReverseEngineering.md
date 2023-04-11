@@ -57,4 +57,49 @@ defines 16 bit scan codes. The code 0x0005 is assigned to the letter "B".
 </pre>
 This time, the same byte ist set back to 4. (The scan code 0x0004 is assigned to the letter "A")
 ## Table of USB HID scan codes
-A table of USB keyboard scan codes can be found in the [USB HID specification, page 82ff](https://usb.org/sites/default/files/hut1_21.pdf)
+A table of USB keyboard scan codes can be found in the [USB HID specification](https://usb.org/sites/default/files/hut1_21.pdf) at chapter
+10. Keyboard/Keypad Page (0x07)s starting at page 82. (Named Usage ID in that document). It is a 16bit value with the MSB usually being 0x00 for
+most "regular" keys.
+## Keyboard mapping frames
+
+It appears, that for each key, 3 consecutive bytes are used at a specific index of one of the 7 mapping frames (following the start transaction).
+Each mapping frame starts with the following sequence:
+
+<pre>
+     Checksum
+     │
+     │   Operation 9 == Map keys?
+     │    │
+     │    │   Some index?
+   ┌─┴─┐  │ ┌─┴─┐
+04 CS CS 09 ?? ??
+</pre>
+The offsets for the individual keys are shown in the follwing annotated dump. The key names are mostly taken verbatim from the labels of my MX 10.0
+(german layout). The first two byte of the "normal" keys usually are 0x20 0x00. The 3rd byte seem to be the scan code (Usage ID). For the modifier keys,
+the second byte has a different value (perhaps a bitmap of the modifier types?). Another exception are the 4 keys in the uppermost row above the numeric
+block (from left to right: Vol-, Mute, Vol+ and Calc). Those have a completely different byte sequence, starting with 0x30. Finally, there is the
+"CHERRY" key, which does not even exist on my MX 10.0 but regardless is configurable in the Windows cherry utility. Also, 4 keys have duplicate entries
+where BOTH of the entries (in the 6th and 7th frame) are set by the Windows cherry utility: Mute, Num/, Num8 and Num5. Some unlabeled byte sequences
+appear to be associated to keys that are not available in the german layout of my keyboard.
+<pre>
+                 ESC    °(`)   Tab    CapsLk LShift LCtrl  Pause  1      Q      A      <(k45) LWin   CHERRY 2      W      S      Y(Z)   LAlt
+0443050938000000 200029 200035 20002b 200039 200200 200100 200048 20001e 200014 200004 200064 200800 a00300 20001f 20001a 200016 20001d 200400 2000
+
+             F1     3      E      D      X             F2     4      R      F      C             F3     5      T      G      V             F4
+043d05093838 00003a 200020 200008 200007 20001b 200000 20003b 200021 200015 200009 200006 200000 20003c 200022 200017 20000a 200019 20008b 20003d 20
+
+               6      Z(Y)   H      B      Space  F5     7      U      J      N             F6     8      I      K      M             F7     9
+04020609387000 000023 20001c 20000b 200005 20002c 20003e 200024 200018 20000d 200011 208000 20003f 200025 20000c 20000e 200010 20008a 200040 200026
+
+                 O      L      ,             F8     0      P      Ö(;)   .      RAlt   F9     ß(-)   Ü([)   Ä(')   -(/)          F10    ´(=)
+0449070938a80000 200012 20000f 200036 200088 200041 200027 200013 200033 200037 204000 200042 20002d 20002f 200034 200038 a00100 200043 20002e 2000
+
+             +(])   #(k42)        App    F11    BS            Enter  RShift RCtrl  F12    Ins    Del                 Left   PrtScr Pos1   End
+0456080938e0 000030 200032 200087 200065 200044 20002a 200031 200028 202000 201000 200045 200049 20004c 200089200000 200050 200046 20004a 20004d 20
+
+                     Up     Down   ScrLck PgUp   PgDn                Right  Vol-   NumLk  Num7   Num4   Num1          Mute   Num/   Num8   Num5
+04d00809381801000000 200052 200051 200047 20004b 20004e 200000200000 20004f 30ea00 200053 20005f 20005c 200059 200000 30e200 200054 200060 20005d
+
+                 Num2   Num0   Vol+   Num*   Num9   Num6   Num3   Num,   Calc   Num-   Num+          NumEnt            Mute   Num/   Num8   Num5 
+047b0a092a500100 20005a 200062 30e900 200055 200061 20005e 20005b 200063 309201 200056 200057 200085 200058 2000000000 30e200 200054 200060 20005d
+</pre>
