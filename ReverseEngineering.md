@@ -57,11 +57,10 @@ defines 16 bit scan codes. The code 0x0005 is assigned to the letter "B".
 </pre>
 This time, the same byte ist set back to 4. (The scan code 0x0004 is assigned to the letter "A")
 ## Table of USB HID scan codes
-A table of USB keyboard scan codes can be found in the [USB HID specification](https://usb.org/sites/default/files/hut1_21.pdf) at chapter
-10. Keyboard/Keypad Page (0x07)s starting at page 82. (Named Usage ID in that document). It is a 16bit value with the MSB usually being 0x00 for
+A table of USB keyboard scan codes can be found in the [USB HID specification](https://usb.org/sites/default/files/hut1_21.pdf#chapter.10).
+(Named **Usage ID** in that document). It is a 16bit value with the MSB usually being 0x00 for
 most "regular" keys.
 ## Keyboard mapping frames
-
 It appears, that for each key, 3 consecutive bytes are used at a specific index of one of the 7 mapping frames (following the start transaction).
 Each mapping frame starts with the following sequence:
 
