@@ -3,10 +3,11 @@
 ## Test environment for packet sniffing
 
 I use a virtualized Windows 10 (with Cherry's utility installed). For virtualization, I use libvirt and virt-manager running on Fedora (36).
-After starting the VM, I enable USB Redirection of the keyboard in virt-manager using the Menu: "Virtual Machine" -> "Redirect USB device".
-This presents a dialog which allows selecting the device(s) to be redirected to the windows guest. After enabling redirection, in the
-windows guest, the GUI of the Cherry utility should appear. The keyboard is no longer available in the Linux host. Therfore you should
-have a second (different) keyboard connected to the host.
+Using linux on the host for USB sniffing is specifically easy, because the linux kernel has the necessary feature (/dev/usbmonX) already builtin.
+No special drivers have to be installed.  After starting the VM, I enable USB Redirection of the keyboard in virt-manager using the Menu:
+"Virtual Machine" -> "Redirect USB device".  This presents a dialog which allows selecting the device(s) to be redirected to the windows guest.
+After redirecting the Cherry keyboard, in the windows guest, the GUI of the Cherry utility should appear. At the same time, the keyboard is no
+longer available in the Linux host. Therfore you should have a second (different) keyboard connected to the host.
 
 Now, start tshark using the following script:
 ```bash
@@ -18,8 +19,13 @@ tshark -i usbmon0 -e usb.data_fragment -T fields -l -Y "usb.bus_id == ${bus} and
 ```
 The 046a:00df above is the VendorID:ProductID of my MX 10.0 keyboard.
 
+Note about tshark:
+tshark is the cli variant of wireshark which is an excellent tool for analyzing USB frames. It is readily available on most modern linux distros.
+I prefer the cli variant over the GUI, because its output can be piped easily into scripts for further analyzation. On Fedora, you can simply
+install it using the command `sudo dnf install wireshark-cli`
+
 After that, in the guest, start mapping a key and observe the output of tshark in the terminal window after hitting "Apply" in the GUI.
-It should print 12 lines of hex values. Each line represents a control packets sent to the device.
+It should print 12 lines of hex values. Each line represents a control packet sent to the device.
 The first three packets are device info requests. The 4th ist a "Start transaction". Following are 7 frames representing the actual
 mapping. Finally the 12th packet represents an "End transaction"
 
@@ -78,8 +84,8 @@ The offsets for the individual keys are shown in the follwing annotated dump. Th
 the second byte has a different value (perhaps a bitmap of the modifier types?). Another exception are the 4 keys in the uppermost row above the numeric
 block (from left to right: Vol-, Mute, Vol+ and Calc). Those have a completely different byte sequence, starting with 0x30. Finally, there is the
 "CHERRY" key, which does not even exist on my MX 10.0 but regardless is configurable in the Windows cherry utility. Also, 4 keys have duplicate entries
-where BOTH of the entries (in the 6th and 7th frame) are set by the Windows cherry utility: Mute, Num/, Num8 and Num5. Some unlabeled byte sequences
-appear to be associated to keys that are not available in the german layout of my keyboard.
+where <b>BOTH</b> of the entries (in the 6th and 7th frame) are set by the Windows cherry utility: Mute, Num/, Num8 and Num5.
+Some unlabeled byte sequences appear to be associated to keys that are not available in the german layout of my keyboard.
 <pre>
                  ESC    °(`)   Tab    CapsLk LShift LCtrl  Pause  1      Q      A      <(k45) LWin   CHERRY 2      W      S      Y(Z)   LAlt
 0443050938000000 200029 200035 20002b 200039 200200 200100 200048 20001e 200014 200004 200064 200800 a00300 20001f 20001a 200016 20001d 200400 2000
@@ -102,3 +108,15 @@ appear to be associated to keys that are not available in the german layout of m
                  Num2   Num0   Vol+   Num*   Num9   Num6   Num3   Num,   Calc   Num-   Num+          NumEnt            Mute   Num/   Num8   Num5 
 047b0a092a500100 20005a 200062 30e900 200055 200061 20005e 20005b 200063 309201 200056 200057 200085 200058 2000000000 30e200 200054 200060 20005d
 </pre>
+The following  unlabeled byte sequences might be associated to other foreign keyboard layouts:
+<table>
+<tr><th>Bytes</th><th>Location</th><th>Label in the spec</th></tr>
+<tr><td>20008b</td><td>2nd frame, following V</td><td>Keyboard International5</td></tr>
+<tr><td>20008a</td><td>3rd frame, following M</td><td>Keyboard International4</td></tr>
+<tr><td>200088</td><td>4th frame, following ,</td><td>Keyboard International2</td></tr>
+<tr><td>200087</td><td>5th frame, following #</td><td>Keyboard International1</td></tr>
+<tr><td>200031</td><td>5th frame, following BS</td><td>Keyboard \ and |</td></tr>
+<tr><td>200089</td><td>5th frame, following Del</td><td>Keyboard International3</td></tr>
+<tr><td>200085</td><td>7th frame, following Num+</td><td>Keypad Comma</td></tr>
+</table>
+
