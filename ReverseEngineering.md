@@ -13,8 +13,8 @@ Now, start tshark using the following script:
 ```bash
 #!/bin/sh
 line="$(lsusb -d 046a:00df)"
-bus=$(echo "${line}" | awk '{print $2}')
-dev=$(echo "${line}" | awk '{print $4}' | tr -d :)
+bus=$(echo "${line}" | awk '{printf "%d",$2}')
+dev=$(echo "${line}" | awk '{printf "%d",$4}')
 tshark -i usbmon0 -e usb.data_fragment -T fields -l -Y "usb.bus_id == ${bus} and usb.device_address == ${dev} and usb.src == host and usb.data_fragment > 0"
 ```
 The 046a:00df above is the VendorID:ProductID of my MX 10.0 keyboard.
