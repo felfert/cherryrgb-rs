@@ -76,7 +76,7 @@ jobs:
 
   clean:
     if: ${{ github.event_name != 'pull_request' }} # If this is a pull request, stop here
-    name: Clean target before matrix build
+    name: Clean before matrix build
     needs: [test, clippy, rustfmt, docs, publish-dry-run]
     runs-on: ubuntu-latest
     steps:
@@ -87,7 +87,7 @@ jobs:
     needs: [clean]
     strategy:
       matrix:
-        # Name of the artifact: <assetprefix>-<tag>-<assetname>.tag.gz
+        # Name of the tar archives: <assetprefix>-<tag>-<assetname>.tar.gz
         assetprefix: [cherryrgb-rs]
         job:
         - os: ubuntu-latest
