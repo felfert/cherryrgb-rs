@@ -1,4 +1,4 @@
-name: Deploy
+name: Publish
 
 on:
   workflow_call:
@@ -6,11 +6,13 @@ on:
       artifact-id:
         required: true
         type: string
+  workflow_dispatch:
  
 jobs:
   publish-github:
-    if: ${{ github.ref_type == 'tag' }} # Just to be safe (actually checked in CI already)
-    name: Publish to github
+    # Just to be safe (actually checked in CI already)
+    if: ${{ github.ref_type == 'tag' && github.event_name != 'workflow_dispatch' }}
+    name: Publish to GitHub
     runs-on: ubuntu-latest
     steps:
     - name: Fetch artifacts
