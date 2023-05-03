@@ -1,3 +1,4 @@
+test
 # Cherry RGB Keyboard Library
 
 [![Crates.io](https://img.shields.io/crates/v/cherryrgb.svg)](https://crates.io/crates/cherryrgb)
