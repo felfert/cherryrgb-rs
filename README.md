@@ -207,6 +207,10 @@ This project is not affiliated or endorsed by Cherry GmbH.
 
 ## Changelog
 
+### Unreleased
+
+* Refactored to use hidapi instead of rusb - Thanks to @1attackthedpoint1
+
 ### v0.2.10 - 25/08/2026
 
 * Added cargo audit in github CI
