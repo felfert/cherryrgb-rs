@@ -64,6 +64,7 @@ use models::{Keymap, ProfileKey};
 use rgb::RGB8;
 use serde_json::{self, Value};
 use std::str::FromStr;
+use std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
 // Re-exports
@@ -145,13 +146,19 @@ pub fn find_devices(product_id: Option<u16>) -> Result<Vec<(u16, u16)>, CherryRg
     // Search for the vendor control collection of Cherry keyboards.
     // Wired keyboards expose it on interface 1, wireless single-interface
     // keyboards on interface 0 (see #63) - matching by usage page covers
-    // both. A single keyboard may expose more than one matching HID
-    // collection, so the result is deduplicated.
+    // both. Legacy keyboards use a different usage page. A single keyboard
+    // may expose more than one matching HID collection, so the result is
+    // deduplicated.
     let mut usb_ids: Vec<(u16, u16)> = api
         .device_list()
         .filter(|dev| {
+            let usage_page = if legacy::is_legacy_product_id(dev.product_id()) {
+                legacy::LEGACY_USAGE_PAGE
+            } else {
+                USAGE_PAGE
+            };
             dev.vendor_id() == CHERRY_USB_VID
-                && dev.usage_page() == USAGE_PAGE
+                && dev.usage_page() == usage_page
                 && is_supported(dev.product_id())
         })
         .filter(|dev| match product_id {
@@ -205,22 +212,58 @@ pub fn read_color_profile(color_profile: &str) -> Result<Vec<ProfileKey>, Cherry
     )
 }
 
-/// Holds a handle to the USB keyboard device
-pub struct CherryKeyboard {
-    device_handle: hidapi::HidDevice,
+/// A keyboard speaking either the default or the legacy protocol
+pub enum Keyboard {
+    /// Default protocol keyboard
+    Default(CherryKeyboard),
+    /// Legacy framebuffer protocol keyboard (e.g. MX BOARD 6.0 RGB)
+    Legacy(legacy::LegacyKeyboard),
 }
+
+impl Keyboard {
+    /// Open the keyboard, choosing the protocol by its product id
+    pub fn open(vendor_id: u16, product_id: u16) -> Result<Self, CherryRgbError> {
+        if legacy::is_legacy_product_id(product_id) {
+            Ok(Self::Legacy(legacy::LegacyKeyboard::new(
+                vendor_id, product_id,
+            )?))
+        } else {
+            Ok(Self::Default(CherryKeyboard::new(vendor_id, product_id)?))
+        }
+    }
+}
+
+/// Wrapper to make the hidapi device handle `Send`
+struct Device(hidapi::HidDevice);
 
 // SAFETY: hidapi itself declares `Send` for its hidraw, linux-native and
 // windows backends; the dynamic backend dispatch used by the
-// linux-native-basic-udev backend simply misses the impls. The device
-// handle is a plain opaque pointer, moving it between threads is fine.
-// Callers (e.g. cherryrgb_service) serialize access with a mutex.
-unsafe impl Send for CherryKeyboard {}
-unsafe impl Sync for CherryKeyboard {}
+// linux-native-basic-udev backend simply misses the impl. The handle is
+// not `Sync`, so CherryKeyboard keeps it behind a mutex.
+unsafe impl Send for Device {}
+
+/// Holds a handle to the USB keyboard device
+pub struct CherryKeyboard {
+    device_handle: Mutex<Device>,
+    /// Path of the hidraw node, needed to locate the matching evdev nodes
+    #[cfg(all(target_os = "linux", feature = "uhid"))]
+    device_path: std::path::PathBuf,
+    /// Grabbed evdev nodes, the grab is held as long as these are open
+    #[cfg(all(target_os = "linux", feature = "uhid"))]
+    grabbed_inputs: Vec<std::fs::File>,
+}
 
 impl CherryKeyboard {
-    /// Open the vendor control interface of the keyboard
+    /// Open the vendor control interface of the keyboard.
+    /// Fails for legacy protocol keyboards, use `Keyboard::open` to open
+    /// keyboards of either protocol.
     pub fn new(vendor_id: u16, product_id: u16) -> Result<Self, CherryRgbError> {
+        if legacy::is_legacy_product_id(product_id) {
+            return Err(CherryRgbError::LegacyError(format!(
+                "keyboard {vendor_id:04x}:{product_id:04x} uses the legacy protocol"
+            )));
+        }
+
         let ctx = HidApi::new()?;
 
         // A keyboard may expose more than one HID collection with the
@@ -245,7 +288,21 @@ impl CherryKeyboard {
 
         let device_handle = device.open_device(&ctx)?;
 
-        Ok(Self { device_handle })
+        Ok(Self {
+            device_handle: Mutex::new(Device(device_handle)),
+            #[cfg(all(target_os = "linux", feature = "uhid"))]
+            device_path: std::path::PathBuf::from(device.path().to_string_lossy().into_owned()),
+            #[cfg(all(target_os = "linux", feature = "uhid"))]
+            grabbed_inputs: Vec::new(),
+        })
+    }
+
+    /// Lock the device handle. A panic while holding the lock cannot leave
+    /// the handle in an inconsistent state, so poisoning is ignored.
+    fn device(&self) -> MutexGuard<'_, Device> {
+        self.device_handle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
     }
 
     /// Writes a control packet first, then reads interrupt packet
@@ -257,7 +314,11 @@ impl CherryKeyboard {
         packet_bytes.resize(64, 0x00);
 
         let mut response = [0u8; 64];
-        self.device_handle
+        // Hold the lock across write and read, so concurrent callers
+        // cannot steal each other's response
+        let device = self.device();
+        device
+            .0
             .write(&packet_bytes)
             .map_err(|err| CherryRgbError::UsbError("Failed writing output report".into(), err))?;
 
@@ -267,24 +328,30 @@ impl CherryKeyboard {
             packet,
         );
 
-        let size_read = self
-            .device_handle
+        let size_read = device
+            .0
             .read_timeout(&mut response, TIMEOUT_MS)
             .map_err(|err| CherryRgbError::UsbError("Failed reading response".into(), err))?;
+        drop(device);
+
+        // hidapi signals a timeout by reading 0 bytes
+        if size_read == 0 {
+            return Err(CherryRgbError::ProtocolError(format!(
+                "Timeout waiting for response to {:?}",
+                packet.payload()
+            )));
+        }
+
+        let resp_payload = std::io::Cursor::new(&response).read_ne::<Packet<Payload>>();
 
         log::debug!(
             "<< INPUT REPORT ({size_read} bytes) {:?}\n<< {}\n",
-            response,
-            {
-                let resp_payload = std::io::Cursor::new(&response).read_ne::<Packet<Payload>>();
-                match &resp_payload {
-                    Ok(pkt) => format!("{:?} Checksum valid: {:?}", pkt, pkt.verify_checksum()),
-                    Err(e) => format!("Failed to parse, err: {:?}", e),
-                }
+            hex::encode(&response[..size_read]),
+            match &resp_payload {
+                Ok(pkt) => format!("{:?} Checksum valid: {:?}", pkt, pkt.verify_checksum()),
+                Err(e) => format!("Failed to parse, err: {:?}", e),
             }
         );
-
-        let resp_payload = std::io::Cursor::new(&response).read_ne::<Packet<Payload>>();
 
         Ok(resp_payload.ok())
     }
@@ -407,12 +474,66 @@ impl CherryKeyboard {
         Ok(all_keys)
     }
 
+    /// Grab the evdev nodes the kernel creates for this HID interface, so
+    /// its key events reach only us (via hidraw) and not the OS. This
+    /// replaces the kernel driver detaching of the former rusb backend,
+    /// which is not possible with hidraw because hidraw itself is provided
+    /// by the kernel HID driver. The grab is held until the keyboard is dropped.
+    #[cfg(all(target_os = "linux", feature = "uhid"))]
+    pub fn grab_key_events(&mut self) -> Result<(), CherryRgbError> {
+        use std::os::fd::AsRawFd;
+
+        // EVIOCGRAB = _IOW('E', 0x90, int)
+        const EVIOCGRAB: libc::c_ulong = 0x40044590;
+
+        let io_err = |msg: String| {
+            CherryRgbError::GeneralUsbError(hidapi::HidError::HidApiError { message: msg })
+        };
+
+        let node = self
+            .device_path
+            .file_name()
+            .ok_or_else(|| io_err(format!("Invalid hidraw path {:?}", self.device_path)))?;
+        let input_dir = std::path::Path::new("/sys/class/hidraw")
+            .join(node)
+            .join("device/input");
+        let inputs = std::fs::read_dir(&input_dir)
+            .map_err(|e| io_err(format!("Failed to read {}: {e}", input_dir.display())))?;
+
+        for input in inputs.flatten() {
+            let Ok(entries) = std::fs::read_dir(input.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if !name.to_string_lossy().starts_with("event") {
+                    continue;
+                }
+                let evdev = std::path::Path::new("/dev/input").join(&name);
+                let file = std::fs::File::open(&evdev)
+                    .map_err(|e| io_err(format!("Failed to open {}: {e}", evdev.display())))?;
+                // SAFETY: EVIOCGRAB takes an int argument by value, fd is valid
+                let rc = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, 1 as libc::c_int) };
+                if rc < 0 {
+                    return Err(io_err(format!(
+                        "Failed to grab {}: {}",
+                        evdev.display(),
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                log::debug!("Grabbed {}", evdev.display());
+                self.grabbed_inputs.push(file);
+            }
+        }
+        Ok(())
+    }
+
     /// forward a key event from our usb device to the virtual UHID keyboard,
     /// filter out any bogus events while doing so.
     #[cfg(all(target_os = "linux", feature = "uhid"))]
     pub fn forward_filtered_keys(&self, vdevice: &mut VirtKbd) -> Result<(), CherryRgbError> {
         let mut buf = [0; 64];
-        match self.device_handle.read_timeout(&mut buf, SHORT_TIMEOUT_MS) {
+        match self.device().0.read_timeout(&mut buf, SHORT_TIMEOUT_MS) {
             Ok(0) => return Ok(()), // read timeout, no data available
             Ok(_len) => {
                 // Bogus event data has bit 3 set in the 3rd byte

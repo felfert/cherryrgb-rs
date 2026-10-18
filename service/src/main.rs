@@ -240,8 +240,20 @@ fn main() -> Result<()> {
     }
 
     let (vendor_id, product_id) = devices.first().unwrap().to_owned();
-    let keyboard =
+    // Legacy keyboards need a continuous frame stream, which the
+    // service does not provide
+    if cherryrgb::legacy::is_legacy_product_id(product_id) {
+        return Err(anyhow!(
+            "Legacy protocol keyboards (product id 0x{product_id:04x}) are not supported by the service, use cherryrgb_cli instead"
+        ));
+    }
+    let mut keyboard =
         CherryKeyboard::new(vendor_id, product_id).context("Failed to create keyboard")?;
+    // Keep the kernel from delivering the (partly bogus) key events of the
+    // vendor interface, we forward the filtered ones via uhid.
+    keyboard
+        .grab_key_events()
+        .context("Failed to grab key events")?;
     let mut vkb = VirtKbd::new();
 
     let aopt_clone = Arc::clone(&aopt);

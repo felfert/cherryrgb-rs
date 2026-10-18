@@ -34,6 +34,8 @@ use crate::{Brightness, CherryRgbError, LightingMode, Speed};
 
 /// USB product ids of keyboards speaking the legacy framebuffer protocol
 const LEGACY_PRODUCT_IDS: &[u16] = &[0x00b8];
+/// HID usage page of the vendor interface of legacy keyboards
+pub(crate) const LEGACY_USAGE_PAGE: u16 = 0xFF01;
 
 /// Number of key slots in one frame
 pub const TOTAL_KEYS: usize = 127;
@@ -47,6 +49,11 @@ const PACKET_LEN: usize = 64;
 pub const MAX_CHANNEL: u8 = 0x3f;
 /// Target frame duration (~25 fps, matches the original utility)
 const FRAME_DURATION: Duration = Duration::from_millis(40);
+/// How long to wait for the acknowledgement of an output packet
+const ACK_TIMEOUT_MS: i32 = 1000;
+/// Maximum number of queued non-ack packets. Key event packets carry the
+/// full list of held keys, so dropping the oldest ones loses nothing.
+const MAX_PENDING: usize = 32;
 
 /// Returns true if the product id belongs to a keyboard speaking the
 /// legacy framebuffer protocol
@@ -142,7 +149,7 @@ impl LegacyKeyboard {
         for dev in api.device_list() {
             if dev.vendor_id() == vendor_id
                 && dev.product_id() == product_id
-                && dev.usage_page() == 0xff01
+                && dev.usage_page() == LEGACY_USAGE_PAGE
             {
                 path = Some(dev.path().to_owned());
                 break;
@@ -158,9 +165,9 @@ impl LegacyKeyboard {
         })
     }
 
-    /// Send a single frame (all 9 packets), then drain the input endpoint.
-    /// Acknowledgements are discarded, key events read while draining are
-    /// queued and can be collected via `read_packet`.
+    /// Send a single frame (all 9 packets), waiting for the acknowledgement
+    /// of each packet. Key events read while waiting are queued and can be
+    /// collected via `read_packet`.
     /// Note: the keyboard forgets the frame within a second unless the
     /// frames keep coming - use one of the streaming methods instead.
     pub fn send_frame(&self, keys: &[KeyColor; TOTAL_KEYS]) -> Result<(), CherryRgbError> {
@@ -172,7 +179,6 @@ impl LegacyKeyboard {
             )?;
         }
         self.send_chunk(9, &keys[TOTAL_KEYS - TAIL_KEYS..], true)?;
-        self.drain_acks();
         Ok(())
     }
 
@@ -180,36 +186,51 @@ impl LegacyKeyboard {
         let packet = build_packet(seq, keys, tail);
 
         self.device.write(&packet).map_err(hid_err)?;
+        self.wait_ack(seq)
+    }
 
-        Ok(())
+    /// Wait for the acknowledgement of the packet just sent, queueing any
+    /// other packet (key events) read in the meantime
+    fn wait_ack(&self, seq: u8) -> Result<(), CherryRgbError> {
+        loop {
+            match self.read_raw(ACK_TIMEOUT_MS)? {
+                Some(pkt) if pkt[0] == 0xc1 && pkt[1] == 0x01 => return Ok(()),
+                Some(pkt) => self.queue_pending(pkt),
+                None => {
+                    return Err(CherryRgbError::LegacyError(format!(
+                        "no acknowledgement for packet {seq}"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn queue_pending(&self, pkt: [u8; PACKET_LEN]) {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.len() >= MAX_PENDING {
+            log::trace!("Pending queue full, dropping oldest packet");
+            pending.pop_front();
+        }
+        pending.push_back(pkt);
     }
 
     /// Read the next input packet (acknowledgement or key event) with
     /// timeout. Returns None when no packet arrived within the timeout.
-    /// Key events read while draining acks are returned first.
-    pub fn read_packet(&self, timeout_ms: i32) -> Option<[u8; PACKET_LEN]> {
+    /// Key events read while waiting for acks are returned first.
+    pub fn read_packet(&self, timeout_ms: i32) -> Result<Option<[u8; PACKET_LEN]>, CherryRgbError> {
         if let Some(pkt) = self.pending.lock().unwrap().pop_front() {
-            return Some(pkt);
+            return Ok(Some(pkt));
         }
         self.read_raw(timeout_ms)
     }
 
-    fn read_raw(&self, timeout_ms: i32) -> Option<[u8; PACKET_LEN]> {
+    fn read_raw(&self, timeout_ms: i32) -> Result<Option<[u8; PACKET_LEN]>, CherryRgbError> {
         let mut buf = [0u8; PACKET_LEN];
-        match self.device.read_timeout(&mut buf, timeout_ms) {
-            Ok(len) if len > 0 => Some(buf),
-            _ => None,
-        }
-    }
-
-    fn drain_acks(&self) {
-        while let Some(pkt) = self.read_raw(5) {
-            if pkt[0] == 0xc1 && pkt[1] == 0x01 {
-                continue; // acknowledgement
-            }
-            // key event read while draining: queue it for the caller
-            self.pending.lock().unwrap().push_back(pkt);
-        }
+        let len = self
+            .device
+            .read_timeout(&mut buf, timeout_ms)
+            .map_err(hid_err)?;
+        Ok((len > 0).then_some(buf))
     }
 
     /// Write a raw 64-byte output report without any ack handling.

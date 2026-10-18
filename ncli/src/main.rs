@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{convert::TryFrom, io::Read, io::Write};
+use std::{convert::TryFrom, io::Write};
 
 use anyhow::{Context, Result};
 use cherryrgb::{
@@ -12,6 +12,8 @@ use std::os::unix::net::UnixStream;
 mod ncli;
 use ncli::{CliCommand, Opt};
 
+#[path = "../../src/profile.rs"]
+mod profile;
 #[path = "../../src/state.rs"]
 mod state;
 
@@ -88,24 +90,7 @@ fn main() -> Result<()> {
             keyboard.set_custom_colors(keys)?;
         }
         CliCommand::ColorProfileFile(args) => {
-            let mut f = std::fs::File::open(&args.file_path)
-                .context(format!("color profile {:?}", args.file_path))?;
-            let mut json: String = String::new();
-
-            f.read_to_string(&mut json)?;
-
-            // Allow // comments
-            let re = regex::RegexBuilder::new(r"//.*?$")
-                .multi_line(true)
-                .build()
-                .unwrap();
-            json = re.replace_all(&json, "").to_string();
-            // Allow trailing comma after last element
-            let re = regex::RegexBuilder::new(r",(\s*\})").build().unwrap();
-            json = re.replace_all(&json, "$1").to_string();
-
-            log::debug!("{json}");
-
+            let json = profile::read_profile_json(&args.file_path)?;
             let colors_from_file =
                 read_color_profile(&json).context("reading colors from color file")?;
 

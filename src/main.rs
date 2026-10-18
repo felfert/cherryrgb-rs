@@ -1,12 +1,17 @@
-use std::{convert::TryFrom, fs::File, io::Read};
+use std::convert::TryFrom;
 
 use anyhow::{anyhow, Context, Result};
-use cherryrgb::{self, read_color_profile, rgb, CherryKeyboard, CustomKeyLeds};
+use cherryrgb::{
+    self,
+    legacy::{self, LegacyKeyboard},
+    read_color_profile, rgb, Brightness, CherryKeyboard, CustomKeyLeds, Keyboard,
+};
 use clap::Parser;
 
 mod cli;
 use cli::{CliCommand, Opt};
 mod common;
+mod profile;
 mod state;
 
 fn main() -> Result<()> {
@@ -38,93 +43,20 @@ fn main() -> Result<()> {
 
     /* Fun begins */
 
-    // Legacy protocol keyboards (e.g. MX BOARD 6.0 RGB, PID 0x00B8) speak a
-    // completely different framebuffer streaming protocol
-    if cherryrgb::legacy::is_legacy_product_id(product_id) {
-        let keyboard = cherryrgb::legacy::LegacyKeyboard::new(vendor_id, product_id)
-            .context("Failed to create legacy keyboard")?;
-
-        match opt.command {
-            CliCommand::Animation(args) => {
-                let color = args.color.unwrap_or(rgb::RGB8::new(255, 255, 255).into());
-
-                log::info!(
-                    "Setting: mode={:?} brightness={:?} speed={:?} color={:?}",
-                    args.mode,
-                    opt.brightness,
-                    args.speed,
-                    color
-                );
-
-                keyboard
-                    .stream_animation(args.mode, opt.brightness, args.speed, color, args.rainbow)
-                    .context("Failed to stream animation")?;
-            }
-            CliCommand::CustomColors(args) => {
-                let bright = cherryrgb::legacy::brightness_byte(opt.brightness);
-                let mut frame =
-                    [cherryrgb::legacy::KeyColor::default(); cherryrgb::legacy::TOTAL_KEYS];
-
-                for (index, color) in args.colors.into_iter().enumerate() {
-                    if index >= cherryrgb::legacy::TOTAL_KEYS {
-                        break;
-                    }
-                    frame[index] = cherryrgb::legacy::KeyColor::new(bright, color);
-                }
-
-                keyboard
-                    .stream_static(&frame)
-                    .context("Failed to stream colors")?;
-            }
-            CliCommand::ColorProfileFile(args) => {
-                let mut f = File::open(&args.file_path)
-                    .context(format!("color profile {:?}", args.file_path))?;
-                let mut json: String = String::new();
-
-                f.read_to_string(&mut json)?;
-                // Allow // comments
-                let re = regex::RegexBuilder::new(r"//.*?$")
-                    .multi_line(true)
-                    .build()
-                    .unwrap();
-                json = re.replace_all(&json, "").to_string();
-                // Allow trailing comma after last element
-                let re = regex::RegexBuilder::new(r",(\s*\})").build().unwrap();
-                json = re.replace_all(&json, "$1").to_string();
-
-                log::debug!("{json}");
-
-                let colors_from_file =
-                    read_color_profile(&json).context("reading colors from color file")?;
-
-                let bright = cherryrgb::legacy::brightness_byte(opt.brightness);
-                let mut frame =
-                    [cherryrgb::legacy::KeyColor::default(); cherryrgb::legacy::TOTAL_KEYS];
-
-                for key in colors_from_file {
-                    if key.key_index >= cherryrgb::legacy::TOTAL_KEYS {
-                        continue;
-                    }
-                    frame[key.key_index] = cherryrgb::legacy::KeyColor::new(bright, key.rgb_value);
-                }
-
-                keyboard
-                    .stream_static(&frame)
-                    .context("Failed to stream colors")?;
-            }
-        }
-
-        return Ok(());
+    match Keyboard::open(vendor_id, product_id).context("Failed to create keyboard")? {
+        Keyboard::Default(keyboard) => run(&keyboard, opt.command, opt.brightness),
+        // Legacy protocol keyboards (e.g. MX BOARD 6.0 RGB, PID 0x00B8) speak a
+        // completely different framebuffer streaming protocol
+        Keyboard::Legacy(keyboard) => run_legacy(&keyboard, opt.command, opt.brightness),
     }
+}
 
-    let keyboard =
-        CherryKeyboard::new(vendor_id, product_id).context("Failed to create keyboard")?;
-
+fn run(keyboard: &CherryKeyboard, command: CliCommand, brightness: Brightness) -> Result<()> {
     keyboard
         .fetch_device_state()
         .context("Fetching device state failed")?;
 
-    match opt.command {
+    match command {
         CliCommand::CustomColors(args) => {
             keyboard.reset_custom_colors()?;
             let mut keys = CustomKeyLeds::new();
@@ -136,23 +68,7 @@ fn main() -> Result<()> {
             keyboard.set_custom_colors(keys)?;
         }
         CliCommand::ColorProfileFile(args) => {
-            let mut f = File::open(&args.file_path)
-                .context(format!("color profile {:?}", args.file_path))?;
-            let mut json: String = String::new();
-
-            f.read_to_string(&mut json)?;
-            // Allow // comments
-            let re = regex::RegexBuilder::new(r"//.*?$")
-                .multi_line(true)
-                .build()
-                .unwrap();
-            json = re.replace_all(&json, "").to_string();
-            // Allow trailing comma after last element
-            let re = regex::RegexBuilder::new(r",(\s*\})").build().unwrap();
-            json = re.replace_all(&json, "$1").to_string();
-
-            log::debug!("{json}");
-
+            let json = profile::read_profile_json(&args.file_path)?;
             let colors_from_file =
                 read_color_profile(&json).context("reading colors from color file")?;
 
@@ -175,14 +91,68 @@ fn main() -> Result<()> {
             log::info!(
                 "Setting: mode={:?} brightness={:?} speed={:?} color={:?}",
                 args.mode,
-                opt.brightness,
+                brightness,
                 args.speed,
                 color
             );
 
             keyboard
-                .set_led_animation(args.mode, opt.brightness, args.speed, color, args.rainbow)
+                .set_led_animation(args.mode, brightness, args.speed, color, args.rainbow)
                 .context("Failed to set led animation")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_legacy(
+    keyboard: &LegacyKeyboard,
+    command: CliCommand,
+    brightness: Brightness,
+) -> Result<()> {
+    let mut frame = [legacy::KeyColor::default(); legacy::TOTAL_KEYS];
+
+    match command {
+        CliCommand::Animation(args) => {
+            let color = args.color.unwrap_or(rgb::RGB8::new(255, 255, 255).into());
+
+            log::info!(
+                "Setting: mode={:?} brightness={:?} speed={:?} color={:?}",
+                args.mode,
+                brightness,
+                args.speed,
+                color
+            );
+
+            keyboard
+                .stream_animation(args.mode, brightness, args.speed, color, args.rainbow)
+                .context("Failed to stream animation")?;
+        }
+        CliCommand::CustomColors(args) => {
+            let bright = legacy::brightness_byte(brightness);
+            for (key, color) in frame.iter_mut().zip(args.colors) {
+                *key = legacy::KeyColor::new(bright, color);
+            }
+
+            keyboard
+                .stream_static(&frame)
+                .context("Failed to stream colors")?;
+        }
+        CliCommand::ColorProfileFile(args) => {
+            let json = profile::read_profile_json(&args.file_path)?;
+            let colors_from_file =
+                read_color_profile(&json).context("reading colors from color file")?;
+
+            let bright = legacy::brightness_byte(brightness);
+            for key in colors_from_file {
+                if let Some(slot) = frame.get_mut(key.key_index) {
+                    *slot = legacy::KeyColor::new(bright, key.rgb_value);
+                }
+            }
+
+            keyboard
+                .stream_static(&frame)
+                .context("Failed to stream colors")?;
         }
     }
 

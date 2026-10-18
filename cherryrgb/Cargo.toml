@@ -8,7 +8,7 @@ license = "MIT"
 homepage = "https://github.com/skraus-dev/cherryrgb-rs"
 
 [features]
-uhid = ["dep:uhid-virt"]
+uhid = ["dep:uhid-virt", "dep:libc"]
 
 [dependencies]
 thiserror = "2"
@@ -34,6 +34,7 @@ hidapi = "2.6"
 
 [target.'cfg(all(target_os = "linux"))'.dependencies]
 uhid-virt = { version = "0.0.8", optional = true }
+libc = { version = "0.2", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true
